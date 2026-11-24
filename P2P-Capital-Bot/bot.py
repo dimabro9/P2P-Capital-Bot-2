@@ -744,7 +744,24 @@ async def admin_status(m: Message):
 async def cancel_command(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("Действие отменено.", reply_markup=main_kb(m.from_user.id))
+async def health_check(request):
+    return web.Response(text="P2P Capital Bot is running!")
 
+async def start_web_server():
+    app = web.Application()
+
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    log.info(f"HTTP server started on port {port}")
+    return runner
 async def main():
     if not TOKEN:
         raise RuntimeError("Укажи BOT_TOKEN в Environment Variables")
