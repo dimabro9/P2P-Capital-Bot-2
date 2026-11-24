@@ -1,0 +1,17 @@
+[Unit]
+Description=P2P Capital Telegram Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/p2p-capital/P2P-Capital-Bot
+Environment=BOT_TOKEN=PASTE_YOUR_BOT_TOKEN_HERE
+ExecStart=/opt/p2p-capital/P2P-Capital-Bot/.venv/bin/python /opt/p2p-capital/P2P-Capital-Bot/bot.py
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
