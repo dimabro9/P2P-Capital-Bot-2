@@ -339,6 +339,7 @@ class Flow(StatesGroup):
     stock = State()
     limits = State()
     admin_support_reply = State()
+    admin_order_reply = State()
 
 def is_state(current, state):
     return current == state.state
@@ -405,12 +406,24 @@ async def handle_text(m: Message, state: FSMContext):
 
     if txt == L["my_orders"]:
         with connect() as c:
-            rows = c.execute("SELECT * FROM orders WHERE telegram_id=? ORDER BY created_at DESC LIMIT 10",(uid,)).fetchall()
+            rows = c.execute(
+                "SELECT * FROM orders WHERE telegram_id=? ORDER BY created_at DESC LIMIT 10",
+                (uid,)
+            ).fetchall()
         if not rows:
-            await m.answer(t(uid,"no_orders")); return
-        await m.answer("📋 <b>ВАШИ ЗАЯВКИ</b>\n\n" + "\n\n".join(
+            await m.answer(t(uid, "no_orders"))
+            return
+        body = "📋 <b>ВАШИ ЗАЯВКИ</b>\n\n" + "\n\n".join(
             f"#{r['id']} · {r['direction']} {r['amount']} {r['asset']}\n{L['status']}: <b>{r['status']}</b>"
-            for r in rows)); return
+            for r in rows
+        )
+        order_buttons = [
+            [(f"✖️ Отменить заявку #{r['id']}", f"usercancel:{r['id']}")]
+            for r in rows if r["status"] == "NEW"
+        ]
+        order_buttons.append([("⬅️ В меню", "menu:home")])
+        await m.answer(body, reply_markup=ikb(order_buttons))
+        return
 
     if txt == L["support"]:
         await state.set_state(Flow.support)
@@ -475,6 +488,24 @@ async def handle_text(m: Message, state: FSMContext):
         await notify_admins(m.bot,admin_text,reply_markup=ikb([[("✉️ Ответить клиенту",f"supportreply:{ticket_id}:{uid}")]]))
         await state.clear()
         await m.answer(t(uid,"support_sent").format(id=ticket_id), reply_markup=main_kb(uid)); return
+
+    if is_state(current, Flow.admin_order_reply) and uid in ADMIN_IDS:
+        data = await state.get_data()
+        target = int(data.get("order_reply_target", 0))
+        order_id = data.get("order_reply_id", "")
+        if not txt:
+            await m.answer("Отправьте непустое сообщение клиенту.")
+            return
+        try:
+            await m.bot.send_message(
+                target,
+                f"💬 <b>Сообщение менеджера P2P Capital по заявке #{escape(str(order_id))}</b>\n\n" + escape(txt)
+            )
+            await m.answer("✅ Сообщение отправлено клиенту.")
+        except Exception:
+            await m.answer(t(uid, "reply_fail"))
+        await state.clear()
+        return
 
     if is_state(current, Flow.admin_support_reply) and uid in ADMIN_IDS:
         data = await state.get_data()
@@ -657,14 +688,106 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
             f"📦 <b>Количество:</b> {escape(d['amount'])} {d['asset']}\n"
             f"📊 <b>Курс:</b> {escape(d['rate'])} UAH\n"
             f"💰 <b>Сумма:</b> {escape(d['total'])} UAH\n"
-            f"🕒 <b>Время:</b> {now()}\n\n"
-            f"✉️ Чтобы написать клиенту: <code>/reply {uid} текст</code>\n"
-            f"🔧 Чтобы изменить статус: <code>/status {order_id} ACCEPTED</code>"
+            f"🕒 <b>Время:</b> {now()}"
         )
-        await notify_admins(cq.bot,admin_text,reply_markup=ikb([[(f"✉️ Открыть чат с клиентом","contact:"+str(uid))]]))
+        await notify_admins(
+            cq.bot,
+            admin_text,
+            reply_markup=ikb([
+                [("✅ Принять", f"orderaccept:{order_id}"),
+                 ("❌ Отклонить", f"orderreject:{order_id}")],
+                [("✉️ Написать пользователю", f"orderreply:{order_id}")]
+            ])
+        )
         await state.clear()
         await edit_screen(cq.message, t(uid,"created").format(id=order_id))
         await cq.answer(); return
+    if data.startswith("usercancel:"):
+        order_id = data.split(":", 1)[1]
+        with connect() as c:
+            cur = c.execute(
+                "UPDATE orders SET status='CANCELLED' "
+                "WHERE id=? AND telegram_id=? AND status='NEW'",
+                (order_id, uid)
+            )
+            changed = cur.rowcount
+        if not changed:
+            await cq.answer("Заявку нельзя отменить: возможно, она уже обработана.", show_alert=True)
+            return
+        await cq.answer("Заявка отменена.")
+        try:
+            await cq.message.edit_text(
+                (cq.message.text or "📋 <b>ВАШИ ЗАЯВКИ</b>") +
+                f"\n\n✖️ Заявка #{escape(order_id)} отменена.",
+                reply_markup=ikb([[("⬅️ В меню", "menu:home")]])
+            )
+        except Exception:
+            pass
+        await notify_admins(
+            cq.bot,
+            f"✖️ <b>ПОЛЬЗОВАТЕЛЬ ОТМЕНИЛ ЗАЯВКУ #{escape(order_id)}</b>\nID: <code>{uid}</code>"
+        )
+        return
+
+    if data.startswith("orderaccept:") or data.startswith("orderreject:"):
+        if uid not in ADMIN_IDS:
+            await cq.answer(t(uid, "admin_only"), show_alert=True)
+            return
+        action, order_id = data.split(":", 1)
+        new_status = "ACCEPTED" if action == "orderaccept" else "REJECTED"
+        with connect() as c:
+            order = c.execute(
+                "SELECT telegram_id FROM orders WHERE id=?", (order_id,)
+            ).fetchone()
+            if not order:
+                await cq.answer("Заявка не найдена.", show_alert=True)
+                return
+            cur = c.execute(
+                "UPDATE orders SET status=? WHERE id=? AND status='NEW'",
+                (new_status, order_id)
+            )
+            changed = cur.rowcount
+        if not changed:
+            await cq.answer("Эта заявка уже обработана.", show_alert=True)
+            return
+        try:
+            await cq.bot.send_message(
+                order["telegram_id"],
+                t(order["telegram_id"], "user_status").format(id=order_id, status=new_status)
+            )
+        except Exception:
+            log.exception("Could not notify user about order decision")
+        try:
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cq.answer("Заявка принята." if new_status == "ACCEPTED" else "Заявка отклонена.")
+        return
+
+    if data.startswith("orderreply:"):
+        if uid not in ADMIN_IDS:
+            await cq.answer(t(uid, "admin_only"), show_alert=True)
+            return
+        order_id = data.split(":", 1)[1]
+        with connect() as c:
+            order = c.execute(
+                "SELECT telegram_id FROM orders WHERE id=?", (order_id,)
+            ).fetchone()
+        if not order:
+            await cq.answer("Заявка не найдена.", show_alert=True)
+            return
+        await state.set_state(Flow.admin_order_reply)
+        await state.update_data(
+            order_reply_target=int(order["telegram_id"]),
+            order_reply_id=order_id
+        )
+        await cq.message.answer(
+            f"✉️ <b>Ответ пользователю по заявке #{escape(order_id)}</b>\n"
+            "Отправьте следующим сообщением текст для клиента. Для выхода нажмите /cancel."
+        )
+        await cq.answer()
+        return
+
     if data.startswith("contact:"):
         if uid not in ADMIN_IDS:
             await cq.answer(t(uid,"admin_only"),show_alert=True); return
@@ -685,8 +808,31 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         elif action == "orders":
             with connect() as c:
                 rows = c.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 15").fetchall()
-            body = "\n\n".join(f"#{r['id']} · user <code>{r['telegram_id']}</code>\n{r['direction']} {r['amount']} {r['asset']} · {r['total_uah']} UAH\n<b>{r['status']}</b>\n<code>/reply {r['telegram_id']} Ваше сообщение</code>" for r in rows) or t(uid,"empty_orders")
-            await edit_screen(cq.message, "📋 <b>ПОСЛЕДНИЕ ЗАЯВКИ</b>\n\n"+body, reply_markup=ikb([[ ("⬅️ В админ-панель","menu:admin") ], [("🏠 В главное меню","menu:home")]]))
+            body = "\n\n".join(
+                f"#{r['id']} · user <code>{r['telegram_id']}</code>\n"
+                f"{r['direction']} {r['amount']} {r['asset']} · {r['total_uah']} UAH\n"
+                f"<b>{r['status']}</b>"
+                for r in rows
+            ) or t(uid, "empty_orders")
+            buttons = []
+            for r in rows:
+                if r["status"] == "NEW":
+                    buttons.append([
+                        (f"✅ Принять #{r['id']}", f"orderaccept:{r['id']}"),
+                        (f"❌ Отклонить #{r['id']}", f"orderreject:{r['id']}")
+                    ])
+                buttons.append([
+                    (f"✉️ Написать · #{r['id']}", f"orderreply:{r['id']}")
+                ])
+            buttons.extend([
+                [("⬅️ В админ-панель", "menu:admin")],
+                [("🏠 В главное меню", "menu:home")]
+            ])
+            await edit_screen(
+                cq.message,
+                "📋 <b>ПОСЛЕДНИЕ ЗАЯВКИ</b>\n\n" + body,
+                reply_markup=ikb(buttons)
+            )
         elif action == "rates":
             await state.set_state(Flow.rate); await edit_screen(cq.message, t(uid,"enter_rate"), reply_markup=ikb([[ ("⬅️ В админ-панель","menu:admin") ], [("🏠 В главное меню","menu:home")]]))
         elif action == "stock":
