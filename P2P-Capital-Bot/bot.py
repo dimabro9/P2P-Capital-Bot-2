@@ -214,20 +214,43 @@ def premium_text(text: str) -> str:
             text = text.replace(fallback, f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>')
     return text
 
-async def edit_screen(message: Message, text: str, reply_markup=None):
-    """Edit a photo-caption menu or a regular text message without sending clutter."""
+ACTIVE_MENU_MESSAGES = {}
+
+async def send_screen(chat_id: int, bot: Bot, text: str, reply_markup=None):
+    """Replace the previous user-facing screen with a fresh photo/text screen."""
+    old_ids = ACTIVE_MENU_MESSAGES.get(chat_id, [])
+    if isinstance(old_ids, int):
+        old_ids = [old_ids]
+    for old_id in old_ids:
+        try:
+            await bot.delete_message(chat_id, old_id)
+        except Exception:
+            pass
     text = premium_text(text)
-    if message.photo:
-        await message.edit_caption(caption=text, reply_markup=reply_markup)
+    if MENU_IMAGE.exists():
+        if len(text) <= 1024:
+            sent = await bot.send_photo(chat_id, FSInputFile(MENU_IMAGE), caption=text, reply_markup=reply_markup)
+        else:
+            sent = await bot.send_photo(chat_id, FSInputFile(MENU_IMAGE), caption="⭐ <b>P2P CAPITAL</b>", reply_markup=None)
+            sent_text = await bot.send_message(chat_id, text, reply_markup=reply_markup)
+            ACTIVE_MENU_MESSAGES[chat_id] = [sent.message_id, sent_text.message_id]
+            return sent_text
     else:
-        await message.edit_text(text, reply_markup=reply_markup)
+        sent = await bot.send_message(chat_id, text, reply_markup=reply_markup)
+    ACTIVE_MENU_MESSAGES[chat_id] = sent.message_id
+    return sent
+
+async def edit_screen(message: Message, text: str, reply_markup=None):
+    """Delete the old screen and send a fresh screen with the menu image."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    return await send_screen(message.chat.id, message.bot, text, reply_markup)
 
 async def show_main_menu(message: Message, uid: int):
-    caption = premium_text(t(uid, "welcome") + "\n\n" + t(uid, "demo_notice"))
-    if MENU_IMAGE.exists():
-        await message.answer_photo(FSInputFile(MENU_IMAGE), caption=caption, reply_markup=main_kb(uid))
-    else:
-        await message.answer(caption, reply_markup=main_kb(uid))
+    caption = t(uid, "welcome") + "\n\n" + t(uid, "demo_notice")
+    return await send_screen(message.chat.id, message.bot, caption, main_kb(uid))
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -342,7 +365,23 @@ async def profile_text(uid: int):
     display=escape(u["nick"] or u["first_name"] or "Без имени")
     badge=" ☑️" if u["premium_badge"] else ""
     joined=(u["created_at"] or "")[:10]
-    return (f"👤 <b>ПРОФИЛЬ</b>{badge}\n\nИмя: <b>{display}</b>{badge}\nID: <code>{uid}</code>\nВ боте с: <b>{joined}</b>\n\n🟢 Обсяг купівлі: <b>{bought:.2f} UAH</b>\n🔵 Обсяг продажу: <b>{sold:.2f} UAH</b>")
+    profile_link = f"tg://user?id={uid}"
+    return (f"👤 <b>ПРОФИЛЬ</b>{badge}\n\nИмя: <b>{display}</b>{badge}\nID: <code>{uid}</code>\n<a href=\"{profile_link}\">🔗 Открыть Telegram-профиль</a>\nВ боте с: <b>{joined}</b>\n\n🟢 Обсяг купівлі: <b>{bought:.2f} UAH</b>\n🔵 Обсяг продажу: <b>{sold:.2f} UAH</b>")
+
+def profile_kb(uid, bot):
+    profile_link = f"tg://user?id={uid}"
+    share_url = (
+        "https://t.me/share/url?url="
+        + __import__("urllib.parse", fromlist=["quote"]).quote(profile_link, safe="")
+        + "&text="
+        + __import__("urllib.parse", fromlist=["quote"]).quote("Мой профиль в Telegram", safe="")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Открыть профиль", url=profile_link)],
+        [InlineKeyboardButton(text="📤 Поделиться профилем", url=share_url)],
+        [InlineKeyboardButton(text="✏️ Изменить ник", callback_data="profile:nick")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
+    ])
 
 def main_kb(uid):
     L = LANGS[lang(uid)]
@@ -397,7 +436,7 @@ async def start(m: Message, state: FSMContext):
     except Exception:
         pass
     if not await is_subscribed(m.bot, m.from_user.id):
-        await m.answer(t(m.from_user.id,"subscription_required"), reply_markup=subscription_keyboard()); return
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"subscription_required"), reply_markup=subscription_keyboard()); return
     await show_main_menu(m, m.from_user.id)
 
 async def choose_language(cq: CallbackQuery):
@@ -428,17 +467,17 @@ async def handle_text(m: Message, state: FSMContext):
 
     if uid not in ADMIN_IDS:
         if not await is_subscribed(m.bot, uid):
-            await m.answer(t(uid,"subscription_required"), reply_markup=subscription_keyboard()); return
+            await send_screen(m.chat.id, m.bot, t(uid,"subscription_required"), reply_markup=subscription_keyboard()); return
         if setting("maintenance") == "1":
-            await m.answer(t(uid,"maintenance")); return
+            await send_screen(m.chat.id, m.bot, t(uid,"maintenance")); return
 
     if txt in {L["language"], L["settings"]}:
-        await m.answer(t(uid,"choose_lang"), reply_markup=ikb([[("🇺🇦 Українська","lang:uk"),("🇷🇺 Русский","lang:ru"),("🇬🇧 English","lang:en")]])); return
+        await send_screen(m.chat.id, m.bot, t(uid,"choose_lang"), reply_markup=ikb([[("🇺🇦 Українська","lang:uk"),("🇷🇺 Русский","lang:ru"),("🇬🇧 English","lang:en")]])); return
 
     if txt == L["buy_sell"]:
         await state.clear()
         await state.set_state(Flow.direction)
-        await m.answer(t(uid,"choose_direction"), reply_markup=ikb([[(L["buy"],"dir:BUY"),(L["sell"],"dir:SELL")],[("⬅️ В меню","menu:home")]])); return
+        await send_screen(m.chat.id, m.bot, t(uid,"choose_direction"), reply_markup=ikb([[(L["buy"],"dir:BUY"),(L["sell"],"dir:SELL")],[("⬅️ В меню","menu:home")]])); return
 
     if txt == L["rates"]:
         with connect() as c:
@@ -446,7 +485,7 @@ async def handle_text(m: Message, state: FSMContext):
         body = "📊 <b>P2P CAPITAL · КУРСЫ</b>\n\n" + "\n\n".join(
             f"💠 <b>{r['asset']}</b>\nПокупка: <b>{r['buy_rate']} UAH</b>\nПродажа: <b>{r['sell_rate']} UAH</b>"
             for r in rows)
-        await m.answer(body); return
+        await send_screen(m.chat.id, m.bot, body); return
 
     if txt == L["stock"]:
         with connect() as c:
@@ -454,7 +493,7 @@ async def handle_text(m: Message, state: FSMContext):
         body = "📦 <b>P2P CAPITAL · НАЛИЧИЕ</b>\n\n" + "\n\n".join(
             f"💠 <b>{r['asset']}</b>\n" + (f"🟢 Доступно: <b>{r['quantity']} {r['asset']}</b>" if r["enabled"] and Decimal(r["quantity"]) > 0 else "🔴 Сейчас нет в наличии")
             for r in rows)
-        await m.answer(body); return
+        await send_screen(m.chat.id, m.bot, body); return
 
     if txt == L["my_orders"]:
         with connect() as c:
@@ -463,7 +502,7 @@ async def handle_text(m: Message, state: FSMContext):
                 (uid,)
             ).fetchall()
         if not rows:
-            await m.answer(t(uid, "no_orders"))
+            await send_screen(m.chat.id, m.bot, t(uid, "no_orders"))
             return
         body = "📋 <b>ВАШИ ЗАЯВКИ</b>\n\n" + "\n\n".join(
             f"#{r['id']} · {r['direction']} {r['amount']} {r['asset']}\n{L['status']}: <b>{r['status']}</b>"
@@ -474,23 +513,23 @@ async def handle_text(m: Message, state: FSMContext):
             for r in rows if r["status"] == "NEW"
         ]
         order_buttons.append([("⬅️ В меню", "menu:home")])
-        await m.answer(body, reply_markup=ikb(order_buttons))
+        await send_screen(m.chat.id, m.bot, body, reply_markup=ikb(order_buttons))
         return
 
     if txt == L.get("profile", "👤 Профиль"):
-        await m.answer(await profile_text(uid), reply_markup=ikb([[ (L.get("edit_nick","✏️ Изменить ник"),"profile:nick") ],[("⬅️ В меню","menu:home")]])); return
+        await send_screen(m.chat.id, m.bot, await profile_text(uid), reply_markup=profile_kb(uid, m.bot)); return
 
     if txt == L["support"]:
         await state.set_state(Flow.support)
-        await m.answer(t(uid,"support_prompt"), reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]])); return
+        await send_screen(m.chat.id, m.bot, t(uid,"support_prompt"), reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]])); return
 
     if txt == L["reviews"]:
-        await m.answer(t(uid,"reviews_text"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        await send_screen(m.chat.id, m.bot, t(uid,"reviews_text"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⭐ Открыть отзывы", url=REVIEWS_URL)]
         ])); return
 
     if txt == L["admin"] and uid in ADMIN_IDS:
-        await m.answer(premium_text(t(uid,"admin_home")), reply_markup=ikb([
+        await send_screen(m.chat.id, m.bot, premium_text(t(uid,"admin_home")), reply_markup=ikb([
             [(L["admin_orders"],"adm:orders")],
             [(L["admin_rates"],"adm:rates"),(L["admin_stock"],"adm:stock")],
             [(L["admin_limits"],"adm:limits")],
@@ -505,7 +544,7 @@ async def handle_text(m: Message, state: FSMContext):
             if not amount.is_finite() or amount <= 0:
                 raise InvalidOperation
         except (InvalidOperation, ValueError):
-            await m.answer(t(uid,"bad_amount")); return
+            await send_screen(m.chat.id, m.bot, t(uid,"bad_amount")); return
 
         asset, direction = data["asset"], data["direction"]
         with connect() as c:
@@ -513,7 +552,7 @@ async def handle_text(m: Message, state: FSMContext):
             inv = c.execute("SELECT * FROM inventory WHERE asset=?", (asset,)).fetchone()
         rate = Decimal(rate_row["buy_rate"] if direction == "BUY" else rate_row["sell_rate"])
         if rate <= 0:
-            await m.answer("⚠️ Для цього активу курс ще не налаштований адміністратором."); return
+            await send_screen(m.chat.id, m.bot, "⚠️ Для цього активу курс ще не налаштований адміністратором."); return
         currency=data.get("amount_currency", "asset")
         if currency == "uah":
             amount=(amount/rate).quantize(Decimal("0.000001"),rounding=ROUND_HALF_UP)
@@ -521,26 +560,26 @@ async def handle_text(m: Message, state: FSMContext):
             available = Decimal(inv["quantity"]) if inv and inv["enabled"] else Decimal("0")
             if available <= 0:
                 await state.clear()
-                await m.answer(t(uid,"no_stock").format(asset=asset,manager=SUPPORT_USERNAME), reply_markup=main_kb(uid)); return
+                await send_screen(m.chat.id, m.bot, t(uid,"no_stock").format(asset=asset,manager=SUPPORT_USERNAME), reply_markup=main_kb(uid)); return
             if amount > available:
-                await m.answer(t(uid,"not_enough").format(requested=fmt_num(amount),asset=asset,available=fmt_num(available))); return
+                await send_screen(m.chat.id, m.bot, t(uid,"not_enough").format(requested=fmt_num(amount),asset=asset,available=fmt_num(available))); return
 
         if rate <= 0:
-            await m.answer("⚠️ Для цього активу курс ще не налаштований адміністратором."); return
+            await send_screen(m.chat.id, m.bot, "⚠️ Для цього активу курс ще не налаштований адміністратором."); return
         total = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         current_limit = get_order_limit(direction)
         if total > current_limit:
-            await m.answer(limit_message(uid, direction, current_limit)); return
+            await send_screen(m.chat.id, m.bot, limit_message(uid, direction, current_limit)); return
 
         await state.update_data(amount=str(amount), rate=str(rate), total=str(total))
         await state.set_state(Flow.confirm)
         direction_label = L["buy"] if direction == "BUY" else L["sell"]
-        await m.answer(t(uid,"confirm").format(direction=direction_label,asset=asset,amount=fmt_num(amount),rate=fmt_num(rate),total=fmt_num(total)),
+        await send_screen(m.chat.id, m.bot, t(uid,"confirm").format(direction=direction_label,asset=asset,amount=fmt_num(amount),rate=fmt_num(rate),total=fmt_num(total)),
             reply_markup=ikb([[(t(uid,"confirm_btn"),"order:confirm")],[(t(uid,"cancel"),"order:cancel")],[("⬅️ В меню","menu:home")]])); return
 
     if is_state(current, Flow.support):
         if not txt:
-            await m.answer(t(uid,"support_prompt"), reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]])); return
+            await send_screen(m.chat.id, m.bot, t(uid,"support_prompt"), reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]])); return
         ticket_id = uuid.uuid4().hex[:8].upper()
         with connect() as c:
             c.execute("INSERT INTO tickets VALUES(?,?,?,'OPEN',?)",(ticket_id,uid,txt,now()))
@@ -548,23 +587,23 @@ async def handle_text(m: Message, state: FSMContext):
         admin_text = f"{t(uid,'admin_ticket').format(id=ticket_id)}\n\n👤 <b>Клиент:</b> {profile}\n\n💬 <b>Сообщение:</b>\n{escape(txt)}\n\n{t(uid,'admin_reply_usage')}"
         await notify_admins(m.bot,admin_text,reply_markup=ikb([[("✉️ Ответить клиенту",f"supportreply:{ticket_id}:{uid}")]]))
         await state.clear()
-        await m.answer(t(uid,"support_sent").format(id=ticket_id), reply_markup=main_kb(uid)); return
+        await send_screen(m.chat.id, m.bot, t(uid,"support_sent").format(id=ticket_id), reply_markup=main_kb(uid)); return
 
     if is_state(current, Flow.admin_order_reply) and uid in ADMIN_IDS:
         data = await state.get_data()
         target = int(data.get("order_reply_target", 0))
         order_id = data.get("order_reply_id", "")
         if not txt:
-            await m.answer("Отправьте непустое сообщение клиенту.")
+            await send_screen(m.chat.id, m.bot, "Отправьте непустое сообщение клиенту.")
             return
         try:
             await m.bot.send_message(
                 target,
                 f"💬 <b>Сообщение менеджера P2P Capital по заявке #{escape(str(order_id))}</b>\n\n" + escape(txt)
             )
-            await m.answer("✅ Сообщение отправлено клиенту.")
+            await send_screen(m.chat.id, m.bot, "✅ Сообщение отправлено клиенту.")
         except Exception:
-            await m.answer(t(uid, "reply_fail"))
+            await send_screen(m.chat.id, m.bot, t(uid, "reply_fail"))
         await state.clear()
         return
 
@@ -573,28 +612,28 @@ async def handle_text(m: Message, state: FSMContext):
         target = int(data.get("support_target", 0))
         try:
             await m.bot.send_message(target, "💬 <b>Ответ поддержки P2P Capital</b>\n\n" + escape(txt), reply_markup=ikb([[ ("✉️ Ответить поддержке","menu:support") ]]))
-            await m.answer("✅ Ответ отправлен клиенту.")
+            await send_screen(m.chat.id, m.bot, "✅ Ответ отправлен клиенту.")
         except Exception:
-            await m.answer(t(uid,"reply_fail"))
+            await send_screen(m.chat.id, m.bot, t(uid,"reply_fail"))
         await state.clear(); return
 
     if is_state(current, Flow.nick):
         nick=txt.strip()
         if not nick or len(nick)>24 or any(ord(ch)<32 for ch in nick):
-            await m.answer(t(uid,"enter_nick")); return
+            await send_screen(m.chat.id, m.bot, t(uid,"enter_nick")); return
         with connect() as c: c.execute("UPDATE users SET nick=? WHERE telegram_id=?",(nick,uid))
-        await state.clear(); await m.answer(t(uid,"nick_saved"),reply_markup=main_kb(uid)); return
+        await state.clear(); await send_screen(m.chat.id, m.bot, t(uid,"nick_saved"),reply_markup=main_kb(uid)); return
 
     if is_state(current, Flow.admin_badge) and uid in ADMIN_IDS:
         parts=txt.split()
         if len(parts)!=2 or not parts[0].isdigit() or parts[1].lower() not in {"on","off","1","0","да","нет"}:
-            await m.answer("Формат: USER_ID on/off"); return
+            await send_screen(m.chat.id, m.bot, "Формат: USER_ID on/off"); return
         target=int(parts[0]); value=1 if parts[1].lower() in {"on","1","да"} else 0
         with connect() as c:
             exists=c.execute("SELECT telegram_id FROM users WHERE telegram_id=?",(target,)).fetchone()
-            if not exists: await m.answer("Пользователь ещё не запускал бота."); return
+            if not exists: await send_screen(m.chat.id, m.bot, "Пользователь ещё не запускал бота."); return
             c.execute("UPDATE users SET premium_badge=? WHERE telegram_id=?",(value,target))
-        await state.clear(); await m.answer("☑️ Галочка включена." if value else "Галочка снята.",reply_markup=main_kb(uid)); return
+        await state.clear(); await send_screen(m.chat.id, m.bot, "☑️ Галочка включена." if value else "Галочка снята.",reply_markup=main_kb(uid)); return
 
     if is_state(current, Flow.rate) and uid in ADMIN_IDS:
         try:
@@ -602,9 +641,9 @@ async def handle_text(m: Message, state: FSMContext):
             if asset not in {"USDT","GRAM"} or Decimal(buy) <= 0 or Decimal(sell) <= 0: raise ValueError
             with connect() as c:
                 c.execute("UPDATE rates SET buy_rate=?,sell_rate=?,updated_at=? WHERE asset=?",(buy,sell,now(),asset))
-            await state.clear(); await m.answer(t(uid,"rate_saved"), reply_markup=main_kb(uid))
+            await state.clear(); await send_screen(m.chat.id, m.bot, t(uid,"rate_saved"), reply_markup=main_kb(uid))
         except Exception:
-            await m.answer(t(uid,"enter_rate"))
+            await send_screen(m.chat.id, m.bot, t(uid,"enter_rate"))
         return
 
     if is_state(current, Flow.stock) and uid in ADMIN_IDS:
@@ -614,9 +653,9 @@ async def handle_text(m: Message, state: FSMContext):
             if asset not in {"USDT","GRAM"} or not q.is_finite() or q < 0: raise ValueError
             with connect() as c:
                 c.execute("UPDATE inventory SET quantity=?,enabled=?,updated_at=? WHERE asset=?",(str(q),int(q>0),now(),asset))
-            await state.clear(); await m.answer(t(uid,"stock_saved"), reply_markup=main_kb(uid))
+            await state.clear(); await send_screen(m.chat.id, m.bot, t(uid,"stock_saved"), reply_markup=main_kb(uid))
         except Exception:
-            await m.answer(t(uid,"enter_stock"))
+            await send_screen(m.chat.id, m.bot, t(uid,"enter_stock"))
         return
 
     if is_state(current, Flow.limits) and uid in ADMIN_IDS:
@@ -632,7 +671,7 @@ async def handle_text(m: Message, state: FSMContext):
                     (direction, str(limit), now())
                 )
             await state.clear()
-            await m.answer(
+            await send_screen(m.chat.id, m.bot, 
                 t(uid, "limits_saved").format(
                     direction=("покупки" if direction == "BUY" else "продажи") if lang(uid) == "ru"
                     else ("купівлі" if direction == "BUY" else "продажу") if lang(uid) == "uk"
@@ -642,7 +681,7 @@ async def handle_text(m: Message, state: FSMContext):
                 reply_markup=main_kb(uid)
             )
         except Exception:
-            await m.answer(t(uid, "enter_limits"))
+            await send_screen(m.chat.id, m.bot, t(uid, "enter_limits"))
         return
 
 async def callbacks(cq: CallbackQuery, state: FSMContext):
@@ -654,7 +693,9 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         return
     if uid not in ADMIN_IDS and (not await is_subscribed(cq.bot,uid) or setting("maintenance")=="1") and not data.startswith("menu:home"):
         if setting("maintenance")=="1": await cq.answer(t(uid,"maintenance"),show_alert=True)
-        else: await cq.message.answer(t(uid,"subscription_required"),reply_markup=subscription_keyboard()); await cq.answer()
+        else:
+            await edit_screen(cq.message, t(uid,"subscription_required"), reply_markup=subscription_keyboard())
+            await cq.answer()
         return
     if data.startswith("menu:"):
         action = data.split(":", 1)[1]
@@ -666,7 +707,7 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
             await state.clear()
             await edit_screen(cq.message, t(uid,"choose_lang"), reply_markup=ikb([[ ("🇺🇦 Українська","lang:uk"), ("🇷🇺 Русский","lang:ru"), ("🇬🇧 English","lang:en") ], [("⬅️ В меню","menu:home")]]))
         elif action == "profile":
-            await state.clear(); await edit_screen(cq.message,await profile_text(uid),reply_markup=ikb([[ (L.get("edit_nick","✏️ Изменить ник"),"profile:nick") ],[("⬅️ В меню","menu:home")]]))
+            await state.clear(); await edit_screen(cq.message,await profile_text(uid),reply_markup=profile_kb(uid, cq.bot))
         elif action == "buy_sell":
             await state.clear(); await state.set_state(Flow.direction)
             await edit_screen(cq.message, t(uid,"choose_direction"), reply_markup=ikb([[(L["buy"],"dir:BUY"),(L["sell"],"dir:SELL")],[("⬅️ Назад","menu:home")]]))
@@ -740,7 +781,7 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         _, ticket_id, target = data.split(":",2)
         await state.set_state(Flow.admin_support_reply)
         await state.update_data(support_target=int(target), ticket_id=ticket_id)
-        await cq.message.reply("✉️ <b>Режим ответа в поддержку</b>\nОтправьте следующим сообщением текст клиенту. Для выхода используйте /cancel.")
+        await edit_screen(cq.message, "✉️ <b>Режим ответа в поддержку</b>\nОтправьте следующим сообщением текст клиенту. Для выхода используйте /cancel.", reply_markup=ikb([[ ("✖️ Отмена", "menu:home") ]]))
         await cq.answer(); return
     if data.startswith("lang:"):
         await choose_language(cq); return
@@ -778,7 +819,7 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         await edit_screen(cq.message,prompt,reply_markup=ikb([[ ("⬅️ В меню","menu:home")]])); await cq.answer(); return
     if data.startswith("profile:"):
         if data=="profile:nick":
-            await state.set_state(Flow.nick); await cq.message.answer(t(uid,"enter_nick")); await cq.answer(); return
+            await state.set_state(Flow.nick); await edit_screen(cq.message, t(uid,"enter_nick"), reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]])); await cq.answer(); return
     if data == "order:cancel":
         await state.clear()
         await edit_screen(cq.message, t(uid,"cancel"), reply_markup=main_kb(uid))
@@ -942,9 +983,11 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
             order_reply_target=int(order["telegram_id"]),
             order_reply_id=order_id
         )
-        await cq.message.answer(
+        await edit_screen(
+            cq.message,
             f"✉️ <b>Ответ пользователю по заявке #{escape(order_id)}</b>\n"
-            "Отправьте следующим сообщением текст для клиента. Для выхода нажмите /cancel."
+            "Отправьте следующим сообщением текст для клиента. Для выхода нажмите /cancel.",
+            reply_markup=ikb([[ ("✖️ Отмена", "menu:home") ]])
         )
         await cq.answer()
         return
@@ -1019,35 +1062,43 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         await cq.answer(); return
 
 async def admin_reply(m: Message):
+    try:
+        await m.delete()
+    except Exception:
+        pass
     if m.from_user.id not in ADMIN_IDS:
-        await m.answer(t(m.from_user.id,"admin_only")); return
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"admin_only")); return
     parts = (m.text or "").split(maxsplit=2)
     if len(parts) < 3 or not parts[1].isdigit():
-        await m.answer(t(m.from_user.id,"admin_reply_usage")); return
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"admin_reply_usage")); return
     target = int(parts[1])
     message = parts[2]
     try:
         await m.bot.send_message(target, "💬 <b>Сообщение от менеджера P2P Capital</b>\n\n" + escape(message))
-        await m.answer(t(m.from_user.id,"reply_ok"))
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"reply_ok"))
     except Exception:
-        await m.answer(t(m.from_user.id,"reply_fail"))
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"reply_fail"))
 
 async def admin_status(m: Message):
+    try:
+        await m.delete()
+    except Exception:
+        pass
     if m.from_user.id not in ADMIN_IDS:
-        await m.answer(t(m.from_user.id,"admin_only")); return
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"admin_only")); return
     parts = (m.text or "").split(maxsplit=2)
     if len(parts) != 3:
-        await m.answer(t(m.from_user.id,"status_help")); return
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"status_help")); return
     order_id, status = parts[1], parts[2].upper()
     allowed = {"NEW","ACCEPTED","PROCESSING","COMPLETED","CANCELLED","REJECTED"}
     if status not in allowed:
-        await m.answer(t(m.from_user.id,"status_help")); return
+        await send_screen(m.chat.id, m.bot, t(m.from_user.id,"status_help")); return
     with connect() as c:
         row = c.execute("SELECT telegram_id FROM orders WHERE id=?",(order_id,)).fetchone()
         if not row:
-            await m.answer("Заявка не найдена."); return
+            await send_screen(m.chat.id, m.bot, "Заявка не найдена."); return
         c.execute("UPDATE orders SET status=? WHERE id=?",(status,order_id))
-    await m.answer(t(m.from_user.id,"status_updated").format(id=order_id,status=status))
+    await send_screen(m.chat.id, m.bot, t(m.from_user.id,"status_updated").format(id=order_id,status=status))
     try:
         await m.bot.send_message(row["telegram_id"],t(row["telegram_id"],"user_status").format(id=order_id,status=status))
     except Exception:
@@ -1055,7 +1106,11 @@ async def admin_status(m: Message):
 
 async def cancel_command(m: Message, state: FSMContext):
     await state.clear()
-    await m.answer("Действие отменено.", reply_markup=main_kb(m.from_user.id))
+    try:
+        await m.delete()
+    except Exception:
+        pass
+    await send_screen(m.chat.id, m.bot, "Действие отменено.", reply_markup=main_kb(m.from_user.id))
 async def health_check(request):
     return web.Response(text="P2P Capital Bot is running!")
 
