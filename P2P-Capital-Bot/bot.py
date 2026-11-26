@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -340,6 +341,16 @@ def bot_profile_url(uid: int) -> str:
         return "https://t.me/"
     return f"https://t.me/{BOT_USERNAME}?start=profile_{uid}"
 
+
+def share_profile_url(uid: int) -> str:
+    """Open Telegram's share chooser with the bot's internal profile deep link."""
+    profile_url = bot_profile_url(uid)
+    share_text = "Мой профиль в P2P CAPITAL ⭐"
+    return (
+        "https://t.me/share/url?url=" + quote(profile_url, safe="")
+        + "&text=" + quote(share_text, safe="")
+    )
+
 async def profile_text(uid: int):
     with connect() as c:
         u=c.execute("SELECT * FROM users WHERE telegram_id=?",(uid,)).fetchone()
@@ -414,7 +425,7 @@ async def start(m: Message, state: FSMContext):
                     await m.answer(t(m.from_user.id, "subscription_required"), reply_markup=subscription_keyboard()); return
                 if m.from_user.id not in ADMIN_IDS and setting("maintenance") == "1":
                     await m.answer(t(m.from_user.id, "maintenance")); return
-                await m.answer(await profile_text(target_id), reply_markup=ikb([[ ("👤 Мой профиль", "menu:profile") ],[("🏠 В меню", "menu:home")]]))
+                await m.answer(premium_text(await profile_text(target_id)), reply_markup=ikb([[ ("👤 Мой профиль", "menu:profile") ],[("🏠 В меню", "menu:home")]]))
                 return
     if not await is_subscribed(m.bot, m.from_user.id):
         await m.answer(t(m.from_user.id,"subscription_required"), reply_markup=subscription_keyboard()); return
@@ -720,7 +731,7 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         elif action == "profile":
             await state.clear(); await edit_screen(cq.message, await profile_text(uid), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=L.get("edit_nick", "✏️ Изменить ник"), callback_data="profile:nick")],
-                [InlineKeyboardButton(text="🔗 Поделиться профилем", url=bot_profile_url(uid))],
+                [InlineKeyboardButton(text="📤 Поделиться профилем", url=share_profile_url(uid))],
                 [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")]
             ]))
         elif action == "buy_sell":
