@@ -21,12 +21,14 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 )
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_IDS = {9216132946}
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "9216132946").replace(";", ",").split(",") if x.strip().isdigit()}
+REQUIRED_CHANNEL = "@shop_p2p_capital"
 DB_PATH = Path("data/p2p_capital.db")
 REVIEWS_URL = "https://t.me/reviews_p2p_capital"
 SUPPORT_USERNAME = "Dimonch1x"
 MENU_IMAGE = Path(__file__).parent / "assets" / "menu_banner.png"
 PREMIUM_EMOJI_IDS = {
+    "☑️": "5469724495944131871",
     "⭐": "5438496463044752972",
     "💎": "5427168083074628963",
     "💱": "5402186569006210455",
@@ -99,7 +101,8 @@ LANGS = {
         "reviews_text": "⭐ Открыть канал отзывов:",
         "language_saved": "✅ Язык сохранён.",
         "demo_notice": "⚠️ <b>Важно:</b> бот принимает заявки и передаёт их оператору. Он не принимает платежи и не выполняет переводы.",
-        "admin_home": "🔐 <b>P2P CAPITAL · ADMIN</b>\n\nВыберите действие:",
+"profile": "👤 Профиль", "edit_nick": "✏️ Изменить ник", "enter_nick": "Введите новый ник (до 24 символов):", "nick_saved": "✅ Ник обновлён.", "subscription_required": "🔒 Подпишитесь на @shop_p2p_capital и нажмите «Проверить подписку».", "maintenance": "🛠 Бот временно на технических работах. Попробуйте позже.",
+                "admin_home": "🔐 <b>P2P CAPITAL · ADMIN</b>\n\nВыберите действие:",
         "admin_new": "🆕 <b>НОВАЯ ЗАЯВКА #{id}</b>",
         "admin_ticket": "🎧 <b>НОВОЕ ОБРАЩЕНИЕ #{id}</b>",
         "admin_reply_usage": "Ответить клиенту: <code>/reply USER_ID текст сообщения</code>\n\nID клиента и username указаны в уведомлении.",
@@ -144,7 +147,8 @@ LANGS = {
         "reviews_text": "⭐ Відкрити канал відгуків:",
         "language_saved": "✅ Мову збережено.",
         "demo_notice": "⚠️ <b>Важливо:</b> бот приймає заявки та передає їх оператору. Він не приймає платежі й не виконує перекази.",
-        "admin_home": "🔐 <b>P2P CAPITAL · ADMIN</b>\n\nОберіть дію:",
+"profile": "👤 Профіль", "edit_nick": "✏️ Змінити нік", "enter_nick": "Введіть новий нік (до 24 символів):", "nick_saved": "✅ Нік оновлено.", "subscription_required": "🔒 Підпишіться на @shop_p2p_capital і натисніть «Перевірити підписку».", "maintenance": "🛠 Бот тимчасово на технічних роботах. Спробуйте пізніше.",
+                "admin_home": "🔐 <b>P2P CAPITAL · ADMIN</b>\n\nОберіть дію:",
         "admin_new": "🆕 <b>НОВА ЗАЯВКА #{id}</b>",
         "admin_ticket": "🎧 <b>НОВЕ ЗВЕРНЕННЯ #{id}</b>",
         "admin_reply_usage": "Відповісти клієнту: <code>/reply USER_ID текст повідомлення</code>\n\nID клієнта та username вказані в сповіщенні.",
@@ -189,7 +193,8 @@ LANGS = {
         "reviews_text": "⭐ Open the reviews channel:",
         "language_saved": "✅ Language saved.",
         "demo_notice": "⚠️ <b>Important:</b> this bot collects requests and forwards them to an operator. It does not accept payments or execute transfers.",
-        "admin_home": "🔐 <b>P2P CAPITAL · ADMIN</b>\n\nChoose an action:",
+"profile": "👤 Profile", "edit_nick": "✏️ Change nickname", "enter_nick": "Enter a new nickname (up to 24 characters):", "nick_saved": "✅ Nickname updated.", "subscription_required": "🔒 Subscribe to @shop_p2p_capital and tap “Check subscription”.", "maintenance": "🛠 The bot is temporarily under maintenance. Please try again later.",
+                "admin_home": "🔐 <b>P2P CAPITAL · ADMIN</b>\n\nChoose an action:",
         "admin_new": "🆕 <b>NEW REQUEST #{id}</b>",
         "admin_ticket": "🎧 <b>NEW SUPPORT MESSAGE #{id}</b>",
         "admin_reply_usage": "Reply to a client: <code>/reply USER_ID message text</code>\n\nThe user ID and username are shown in the notification.",
@@ -238,9 +243,10 @@ def init_db():
     with connect() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS users(
-            telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
-            language TEXT NOT NULL DEFAULT 'ru', created_at TEXT NOT NULL
+            telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, nick TEXT,
+            premium_badge INTEGER NOT NULL DEFAULT 0, language TEXT NOT NULL DEFAULT 'ru', created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS bot_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rates(
             asset TEXT PRIMARY KEY, buy_rate TEXT NOT NULL, sell_rate TEXT NOT NULL, updated_at TEXT NOT NULL
         );
@@ -264,6 +270,11 @@ def init_db():
             updated_at TEXT NOT NULL
         );
         """)
+        c.execute("INSERT OR IGNORE INTO bot_settings VALUES('maintenance','0')")
+        # Safe migration for databases created by previous bot versions.
+        cols = {r[1] for r in c.execute("PRAGMA table_info(users)")}
+        if "nick" not in cols: c.execute("ALTER TABLE users ADD COLUMN nick TEXT")
+        if "premium_badge" not in cols: c.execute("ALTER TABLE users ADD COLUMN premium_badge INTEGER NOT NULL DEFAULT 0")
         c.execute("INSERT OR IGNORE INTO order_limits VALUES('BUY','10000',?)", (now(),))
         c.execute("INSERT OR IGNORE INTO order_limits VALUES('SELL','10000',?)", (now(),))
         for asset, buy, sell in [("USDT","45","43"),("GRAM","66","61")]:
@@ -303,6 +314,36 @@ def user_profile(uid, username, first_name):
     first = escape(first_name or "без имени")
     return f"<a href=\"tg://user?id={uid}\">{first}</a> · {name}\n<code>{uid}</code>"
 
+def setting(key: str, default="0"):
+    with connect() as c:
+        row = c.execute("SELECT value FROM bot_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+def set_setting(key: str, value: str):
+    with connect() as c:
+        c.execute("INSERT INTO bot_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key,value))
+
+async def is_subscribed(bot: Bot, uid: int) -> bool:
+    try:
+        member = await bot.get_chat_member(REQUIRED_CHANNEL, uid)
+        return member.status in {"member", "administrator", "creator"}
+    except Exception:
+        log.exception("Subscription check failed; ensure bot is admin/member of %s", REQUIRED_CHANNEL)
+        return False
+
+def subscription_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Подписаться", url="https://t.me/shop_p2p_capital")],[InlineKeyboardButton(text="✅ Проверить подписку", callback_data="sub:check")]])
+
+async def profile_text(uid: int):
+    with connect() as c:
+        u=c.execute("SELECT * FROM users WHERE telegram_id=?",(uid,)).fetchone()
+        bought=c.execute("SELECT COALESCE(SUM(CAST(total_uah AS REAL)),0) FROM orders WHERE telegram_id=? AND direction='BUY' AND status IN ('ACCEPTED','PROCESSING','COMPLETED')",(uid,)).fetchone()[0]
+        sold=c.execute("SELECT COALESCE(SUM(CAST(total_uah AS REAL)),0) FROM orders WHERE telegram_id=? AND direction='SELL' AND status IN ('ACCEPTED','PROCESSING','COMPLETED')",(uid,)).fetchone()[0]
+    display=escape(u["nick"] or u["first_name"] or "Без имени")
+    badge=" ☑️" if u["premium_badge"] else ""
+    joined=(u["created_at"] or "")[:10]
+    return (f"👤 <b>ПРОФИЛЬ</b>{badge}\n\nИмя: <b>{display}</b>{badge}\nID: <code>{uid}</code>\nВ боте с: <b>{joined}</b>\n\n🟢 Обсяг купівлі: <b>{bought:.2f} UAH</b>\n🔵 Обсяг продажу: <b>{sold:.2f} UAH</b>")
+
 def main_kb(uid):
     L = LANGS[lang(uid)]
     # Telegram inline-button labels accept regular Unicode emoji, but not
@@ -315,6 +356,7 @@ def main_kb(uid):
          (f"📋 {L['my_orders'].split(' ', 1)[-1]}", "menu:my_orders")],
         [(f"🎧 {L['support'].split(' ', 1)[-1]}", "menu:support"),
          (f"💬 {L['reviews'].split(' ', 1)[-1]}", "menu:reviews")],
+        [(f"👤 {L['profile']}", "menu:profile")],
         [(f"⚙️ {L['settings'].split(' ', 1)[-1]}", "menu:settings"),
          (f"🌐 {L['language'].split(' ', 1)[-1]}", "menu:language")],
     ]
@@ -333,6 +375,8 @@ class Flow(StatesGroup):
     direction = State()
     asset = State()
     amount = State()
+    nick = State()
+    admin_badge = State()
     confirm = State()
     support = State()
     rate = State()
@@ -352,6 +396,8 @@ async def start(m: Message, state: FSMContext):
         await m.delete()
     except Exception:
         pass
+    if not await is_subscribed(m.bot, m.from_user.id):
+        await m.answer(t(m.from_user.id,"subscription_required"), reply_markup=subscription_keyboard()); return
     await show_main_menu(m, m.from_user.id)
 
 async def choose_language(cq: CallbackQuery):
@@ -379,6 +425,12 @@ async def handle_text(m: Message, state: FSMContext):
         await m.delete()
     except Exception:
         pass
+
+    if uid not in ADMIN_IDS:
+        if not await is_subscribed(m.bot, uid):
+            await m.answer(t(uid,"subscription_required"), reply_markup=subscription_keyboard()); return
+        if setting("maintenance") == "1":
+            await m.answer(t(uid,"maintenance")); return
 
     if txt in {L["language"], L["settings"]}:
         await m.answer(t(uid,"choose_lang"), reply_markup=ikb([[("🇺🇦 Українська","lang:uk"),("🇷🇺 Русский","lang:ru"),("🇬🇧 English","lang:en")]])); return
@@ -425,6 +477,9 @@ async def handle_text(m: Message, state: FSMContext):
         await m.answer(body, reply_markup=ikb(order_buttons))
         return
 
+    if txt == L.get("profile", "👤 Профиль"):
+        await m.answer(await profile_text(uid), reply_markup=ikb([[ (L.get("edit_nick","✏️ Изменить ник"),"profile:nick") ],[("⬅️ В меню","menu:home")]])); return
+
     if txt == L["support"]:
         await state.set_state(Flow.support)
         await m.answer(t(uid,"support_prompt"), reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]])); return
@@ -438,7 +493,9 @@ async def handle_text(m: Message, state: FSMContext):
         await m.answer(premium_text(t(uid,"admin_home")), reply_markup=ikb([
             [(L["admin_orders"],"adm:orders")],
             [(L["admin_rates"],"adm:rates"),(L["admin_stock"],"adm:stock")],
-            [(L["admin_limits"],"adm:limits")]
+            [(L["admin_limits"],"adm:limits")],
+            [("🛠 Тех работы: ВКЛ/ВЫКЛ","adm:maintenance")],
+            [("☑️ Выдать/снять галочку","adm:badge")]
         ])); return
 
     if is_state(current, Flow.amount):
@@ -454,7 +511,12 @@ async def handle_text(m: Message, state: FSMContext):
         with connect() as c:
             rate_row = c.execute("SELECT * FROM rates WHERE asset=?", (asset,)).fetchone()
             inv = c.execute("SELECT * FROM inventory WHERE asset=?", (asset,)).fetchone()
-
+        rate = Decimal(rate_row["buy_rate"] if direction == "BUY" else rate_row["sell_rate"])
+        if rate <= 0:
+            await m.answer("⚠️ Для цього активу курс ще не налаштований адміністратором."); return
+        currency=data.get("amount_currency", "asset")
+        if currency == "uah":
+            amount=(amount/rate).quantize(Decimal("0.000001"),rounding=ROUND_HALF_UP)
         if direction == "BUY":
             available = Decimal(inv["quantity"]) if inv and inv["enabled"] else Decimal("0")
             if available <= 0:
@@ -463,7 +525,6 @@ async def handle_text(m: Message, state: FSMContext):
             if amount > available:
                 await m.answer(t(uid,"not_enough").format(requested=fmt_num(amount),asset=asset,available=fmt_num(available))); return
 
-        rate = Decimal(rate_row["buy_rate"] if direction == "BUY" else rate_row["sell_rate"])
         if rate <= 0:
             await m.answer("⚠️ Для цього активу курс ще не налаштований адміністратором."); return
         total = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -517,6 +578,24 @@ async def handle_text(m: Message, state: FSMContext):
             await m.answer(t(uid,"reply_fail"))
         await state.clear(); return
 
+    if is_state(current, Flow.nick):
+        nick=txt.strip()
+        if not nick or len(nick)>24 or any(ord(ch)<32 for ch in nick):
+            await m.answer(t(uid,"enter_nick")); return
+        with connect() as c: c.execute("UPDATE users SET nick=? WHERE telegram_id=?",(nick,uid))
+        await state.clear(); await m.answer(t(uid,"nick_saved"),reply_markup=main_kb(uid)); return
+
+    if is_state(current, Flow.admin_badge) and uid in ADMIN_IDS:
+        parts=txt.split()
+        if len(parts)!=2 or not parts[0].isdigit() or parts[1].lower() not in {"on","off","1","0","да","нет"}:
+            await m.answer("Формат: USER_ID on/off"); return
+        target=int(parts[0]); value=1 if parts[1].lower() in {"on","1","да"} else 0
+        with connect() as c:
+            exists=c.execute("SELECT telegram_id FROM users WHERE telegram_id=?",(target,)).fetchone()
+            if not exists: await m.answer("Пользователь ещё не запускал бота."); return
+            c.execute("UPDATE users SET premium_badge=? WHERE telegram_id=?",(value,target))
+        await state.clear(); await m.answer("☑️ Галочка включена." if value else "Галочка снята.",reply_markup=main_kb(uid)); return
+
     if is_state(current, Flow.rate) and uid in ADMIN_IDS:
         try:
             asset,buy,sell = txt.upper().split()
@@ -568,6 +647,15 @@ async def handle_text(m: Message, state: FSMContext):
 
 async def callbacks(cq: CallbackQuery, state: FSMContext):
     uid, data = cq.from_user.id, cq.data
+    if data == "sub:check":
+        if await is_subscribed(cq.bot,uid):
+            await edit_screen(cq.message,t(uid,"welcome")+"\n\n"+t(uid,"demo_notice"),reply_markup=main_kb(uid)); await cq.answer("Подписка подтверждена!")
+        else: await cq.answer("Подписка не найдена. Подпишитесь и проверьте снова.",show_alert=True)
+        return
+    if uid not in ADMIN_IDS and (not await is_subscribed(cq.bot,uid) or setting("maintenance")=="1") and not data.startswith("menu:home"):
+        if setting("maintenance")=="1": await cq.answer(t(uid,"maintenance"),show_alert=True)
+        else: await cq.message.answer(t(uid,"subscription_required"),reply_markup=subscription_keyboard()); await cq.answer()
+        return
     if data.startswith("menu:"):
         action = data.split(":", 1)[1]
         L = LANGS[lang(uid)]
@@ -577,6 +665,8 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         elif action in {"settings", "language"}:
             await state.clear()
             await edit_screen(cq.message, t(uid,"choose_lang"), reply_markup=ikb([[ ("🇺🇦 Українська","lang:uk"), ("🇷🇺 Русский","lang:ru"), ("🇬🇧 English","lang:en") ], [("⬅️ В меню","menu:home")]]))
+        elif action == "profile":
+            await state.clear(); await edit_screen(cq.message,await profile_text(uid),reply_markup=ikb([[ (L.get("edit_nick","✏️ Изменить ник"),"profile:nick") ],[("⬅️ В меню","menu:home")]]))
         elif action == "buy_sell":
             await state.clear(); await state.set_state(Flow.direction)
             await edit_screen(cq.message, t(uid,"choose_direction"), reply_markup=ikb([[(L["buy"],"dir:BUY"),(L["sell"],"dir:SELL")],[("⬅️ Назад","menu:home")]]))
@@ -625,6 +715,7 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
                 [("📋 Заявки", "adm:orders"), ("🎧 Поддержка", "adm:tickets")],
                 [("📊 Курсы", "adm:rates"), ("📦 Остатки", "adm:stock")],
                 [("⚖️ Лимиты", "adm:limits")],
+                [("🛠 Тех работы: ВКЛ/ВЫКЛ", "adm:maintenance"), ("☑️ Галочка", "adm:badge")],
                 [("🔄 Обновить", "menu:admin")],
                 [("⬅️ В главное меню", "menu:home")]
             ]))
@@ -672,8 +763,22 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
                 await cq.answer(); return
         await state.update_data(asset=asset)
         await state.set_state(Flow.amount)
-        await edit_screen(cq.message, t(uid,"amount").format(asset=asset), reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]]))
+        with connect() as c: rr=c.execute("SELECT * FROM rates WHERE asset=?",(asset,)).fetchone()
+        rate=rr["buy_rate"] if data_state.get("direction")=="BUY" else rr["sell_rate"]
+        await edit_screen(cq.message, f"📊 Текущий курс: <b>1 {asset} = {rate} UAH</b>\n\nВыберите, в какой валюте указать сумму:", reply_markup=ikb([[ (f"{asset}","amountcurrency:asset"),("🇺🇦 UAH","amountcurrency:uah") ],[("⬅️ В меню","menu:home")]]))
         await cq.answer(); return
+    if data.startswith("amountcurrency:"):
+        currency=data.split(":",1)[1]
+        await state.update_data(amount_currency=currency)
+        d=await state.get_data(); asset=d["asset"]; direction=d["direction"]
+        with connect() as c: rr=c.execute("SELECT * FROM rates WHERE asset=?",(asset,)).fetchone()
+        rate=Decimal(rr["buy_rate"] if direction=="BUY" else rr["sell_rate"])
+        unit=asset if currency=="asset" else "UAH"
+        prompt=f"✍️ Введите сумму в <b>{unit}</b>.\n\nКурс сейчас: <b>1 {asset} = {fmt_num(rate)} UAH</b>\n"
+        await edit_screen(cq.message,prompt,reply_markup=ikb([[ ("⬅️ В меню","menu:home")]])); await cq.answer(); return
+    if data.startswith("profile:"):
+        if data=="profile:nick":
+            await state.set_state(Flow.nick); await cq.message.answer(t(uid,"enter_nick")); await cq.answer(); return
     if data == "order:cancel":
         await state.clear()
         await edit_screen(cq.message, t(uid,"cancel"), reply_markup=main_kb(uid))
@@ -854,7 +959,12 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         if uid not in ADMIN_IDS:
             await cq.answer(t(uid,"admin_only"),show_alert=True); return
         action = data.split(":")[1]
-        if action == "tickets":
+        if action == "maintenance":
+            value="0" if setting("maintenance")=="1" else "1"; set_setting("maintenance",value)
+            await edit_screen(cq.message,"🛠 Технические работы: <b>"+("ВКЛЮЧЕНЫ" if value=="1" else "ВЫКЛЮЧЕНЫ")+"</b>",reply_markup=ikb([[ ("🔄 Переключить","adm:maintenance") ],[("⬅️ В админ-панель","menu:admin")]])); await cq.answer(); return
+        elif action == "badge":
+            await state.set_state(Flow.admin_badge); await edit_screen(cq.message,"Введите: <code>USER_ID on</code> или <code>USER_ID off</code> для выдачи/снятия галочки.",reply_markup=ikb([[ ("⬅️ В админ-панель","menu:admin")]])); await cq.answer(); return
+        elif action == "tickets":
             with connect() as c:
                 rows = c.execute("SELECT id,telegram_id,message,status,created_at FROM tickets ORDER BY created_at DESC LIMIT 15").fetchall()
             body = "🎧 <b>ОБРАЩЕНИЯ В ПОДДЕРЖКУ</b>\n\n" + ("\n\n".join(
