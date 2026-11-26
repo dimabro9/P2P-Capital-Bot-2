@@ -23,7 +23,7 @@ from aiogram.types import (
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = {9216132946}
 DB_PATH = Path("data/p2p_capital.db")
-REVIEWS_URL = "https://t.me/"
+REVIEWS_URL = "https://t.me/reviews_p2p_capital"
 SUPPORT_USERNAME = "Dimonch1x"
 MENU_IMAGE = Path(__file__).parent / "assets" / "menu_banner.png"
 PREMIUM_EMOJI_IDS = {
