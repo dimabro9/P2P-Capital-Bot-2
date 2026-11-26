@@ -107,7 +107,7 @@ LANGS = {
         "reply_fail": "Не удалось отправить сообщение. Проверьте Telegram ID и то, что пользователь запускал бота.",
         "status_help": "Использование: <code>/status ORDER_ID NEW|ACCEPTED|PROCESSING|COMPLETED|CANCELLED|REJECTED</code>",
         "status_updated": "✅ Статус заявки #{id} изменён на <b>{status}</b>.",
-        "user_status": "🔔 Статус вашей заявки <b>#{id}</b> изменён: <b>{status}</b>.",
+        "user_status": "🔔 <b>Ваша заявка #{id} {action}.</b>\n\nНаправление: <b>{direction}</b>\nАктив: <b>{amount} {asset}</b>\nСумма: <b>{total} UAH</b>\nСтатус: <b>{status}</b>.",
         "empty_orders": "Заявок пока нет.",
     },
     "uk": {
@@ -152,7 +152,7 @@ LANGS = {
         "reply_fail": "Не вдалося надіслати повідомлення. Перевірте Telegram ID і чи запускав користувач бота.",
         "status_help": "Використання: <code>/status ORDER_ID NEW|ACCEPTED|PROCESSING|COMPLETED|CANCELLED|REJECTED</code>",
         "status_updated": "✅ Статус заявки #{id} змінено на <b>{status}</b>.",
-        "user_status": "🔔 Статус вашої заявки <b>#{id}</b> змінено: <b>{status}</b>.",
+        "user_status": "🔔 <b>Вашу заявку #{id} {action}.</b>\n\nНапрямок: <b>{direction}</b>\nАктив: <b>{amount} {asset}</b>\nСума: <b>{total} UAH</b>\nСтатус: <b>{status}</b>.",
         "empty_orders": "Заявок поки немає.",
     },
     "en": {
@@ -197,7 +197,7 @@ LANGS = {
         "reply_fail": "Could not send the message. Check the Telegram ID and whether the user has started the bot.",
         "status_help": "Usage: <code>/status ORDER_ID NEW|ACCEPTED|PROCESSING|COMPLETED|CANCELLED|REJECTED</code>",
         "status_updated": "✅ Request #{id} status changed to <b>{status}</b>.",
-        "user_status": "🔔 Your request <b>#{id}</b> status changed: <b>{status}</b>.",
+        "user_status": "🔔 <b>Your request #{id} was {action}.</b>\n\nDirection: <b>{direction}</b>\nAsset: <b>{amount} {asset}</b>\nTotal: <b>{total} UAH</b>\nStatus: <b>{status}</b>.",
         "empty_orders": "No requests yet.",
     }
 }
@@ -589,9 +589,18 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
             body = "📦 <b>P2P CAPITAL · НАЛИЧИЕ</b>\n\n" + "\n\n".join(f"💠 <b>{r['asset']}</b>\n" + (f"🟢 Доступно: <b>{r['quantity']} {r['asset']}</b>" if r["enabled"] and Decimal(r["quantity"]) > 0 else "🔴 Сейчас нет в наличии") for r in rows)
             await edit_screen(cq.message, body, reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]]))
         elif action == "my_orders":
-            with connect() as c: rows = c.execute("SELECT * FROM orders WHERE telegram_id=? ORDER BY created_at DESC LIMIT 10",(uid,)).fetchall()
-            body = t(uid,"no_orders") if not rows else "📋 <b>ВАШИ ЗАЯВКИ</b>\n\n" + "\n\n".join(f"#{r['id']} · {r['direction']} {r['amount']} {r['asset']}\n{L['status']}: <b>{r['status']}</b>" for r in rows)
-            await edit_screen(cq.message, body, reply_markup=ikb([[ ("⬅️ В меню","menu:home") ]]))
+            with connect() as c:
+                rows = c.execute("SELECT * FROM orders WHERE telegram_id=? ORDER BY created_at DESC LIMIT 10",(uid,)).fetchall()
+            body = t(uid,"no_orders") if not rows else "📋 <b>ВАШИ ЗАЯВКИ</b>\n\n" + "\n\n".join(
+                f"#{r['id']} · {r['direction']} {r['amount']} {r['asset']}\n{L['status']}: <b>{r['status']}</b>"
+                for r in rows
+            )
+            buttons = [
+                [(f"✖️ Отменить заявку #{r['id']}", f"usercancel:{r['id']}")]
+                for r in rows if r["status"] == "NEW"
+            ]
+            buttons.append([("⬅️ В меню", "menu:home")])
+            await edit_screen(cq.message, body, reply_markup=ikb(buttons))
         elif action == "support":
             await state.set_state(Flow.support)
             await edit_screen(cq.message, "🎧 <b>ПОДДЕРЖКА P2P CAPITAL</b>\n\n" + t(uid,"support_prompt") + "\n\nВаши сообщения и ответы менеджера будут идти в этой переписке.", reply_markup=ikb([[ ("✖️ Закрыть","support:close") ],[("⬅️ В меню","menu:home")]]))
@@ -620,6 +629,16 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
                 [("⬅️ В главное меню", "menu:home")]
             ]))
         await cq.answer(); return
+    if data == "notice:close":
+        try:
+            await cq.message.edit_text("Уведомление закрыто.", reply_markup=None)
+        except Exception:
+            try:
+                await cq.message.delete()
+            except Exception:
+                pass
+        await cq.answer("Закрыто.")
+        return
     if data == "support:close":
         await state.clear()
         await edit_screen(cq.message, t(uid,"welcome") + "\n\n" + t(uid,"demo_notice"), reply_markup=main_kb(uid))
@@ -705,9 +724,14 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
     if data.startswith("usercancel:"):
         order_id = data.split(":", 1)[1]
         with connect() as c:
+            order = c.execute(
+                "SELECT * FROM orders WHERE id=? AND telegram_id=?", (order_id, uid)
+            ).fetchone()
+            if not order:
+                await cq.answer("Заявка не найдена.", show_alert=True)
+                return
             cur = c.execute(
-                "UPDATE orders SET status='CANCELLED' "
-                "WHERE id=? AND telegram_id=? AND status='NEW'",
+                "UPDATE orders SET status='CANCELLED' WHERE id=? AND telegram_id=? AND status='NEW'",
                 (order_id, uid)
             )
             changed = cur.rowcount
@@ -715,6 +739,16 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
             await cq.answer("Заявку нельзя отменить: возможно, она уже обработана.", show_alert=True)
             return
         await cq.answer("Заявка отменена.")
+        await cq.bot.send_message(
+            uid,
+            f"✖️ <b>Ваша заявка #{escape(order_id)} отменена.</b>\n\n"
+            f"Направление: <b>{escape(order['direction'])}</b>\n"
+            f"Актив: <b>{escape(order['amount'])} {escape(order['asset'])}</b>\n"
+            f"Сумма: <b>{escape(order['total_uah'])} UAH</b>\n"
+            "Статус: <b>ОТМЕНЕНА</b>",
+            reply_markup=ikb([[("✖️ Закрыть", "notice:close")],
+                              [("🏠 В меню", "menu:home")]])
+        )
         try:
             await cq.message.edit_text(
                 (cq.message.text or "📋 <b>ВАШИ ЗАЯВКИ</b>") +
@@ -737,7 +771,7 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
         new_status = "ACCEPTED" if action == "orderaccept" else "REJECTED"
         with connect() as c:
             order = c.execute(
-                "SELECT telegram_id FROM orders WHERE id=?", (order_id,)
+                "SELECT * FROM orders WHERE id=?", (order_id,)
             ).fetchone()
             if not order:
                 await cq.answer("Заявка не найдена.", show_alert=True)
@@ -751,9 +785,31 @@ async def callbacks(cq: CallbackQuery, state: FSMContext):
             await cq.answer("Эта заявка уже обработана.", show_alert=True)
             return
         try:
+            accepted = new_status == "ACCEPTED"
+            action_text = (
+                "принята" if accepted else "отклонена"
+            ) if lang(order["telegram_id"]) == "ru" else (
+                "прийнята" if accepted else "відхилена"
+            ) if lang(order["telegram_id"]) == "uk" else (
+                "accepted" if accepted else "rejected"
+            )
+            status_text = (
+                "ПРИНЯТА" if accepted else "ОТКЛОНЕНА"
+            ) if lang(order["telegram_id"]) == "ru" else (
+                "ПРИЙНЯТА" if accepted else "ВІДХИЛЕНА"
+            ) if lang(order["telegram_id"]) == "uk" else (
+                "ACCEPTED" if accepted else "REJECTED"
+            )
             await cq.bot.send_message(
                 order["telegram_id"],
-                t(order["telegram_id"], "user_status").format(id=order_id, status=new_status)
+                t(order["telegram_id"], "user_status").format(
+                    id=order_id, action=action_text, status=status_text,
+                    direction=escape(order["direction"]),
+                    amount=escape(order["amount"]), asset=escape(order["asset"]),
+                    total=escape(order["total_uah"])
+                ),
+                reply_markup=ikb([[("✖️ Закрыть", "notice:close")],
+                                  [("🏠 В меню", "menu:home")]])
             )
         except Exception:
             log.exception("Could not notify user about order decision")
